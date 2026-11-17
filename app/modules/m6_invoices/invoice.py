@@ -8,6 +8,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_UP
 
 from ... import config
+from ..m4_proration import pricing as pricing_mod
 from ..m4_proration import rounding
 
 
@@ -16,6 +17,20 @@ def invoice_id_for(sub: dict) -> str:
         return ""
     start = str(sub.get("period_start") or "")[:7].replace("-", "")
     return f"INV-{start}-{sub.get('sub_id', '')}"
+
+
+def contract_id_for(sub: dict) -> str:
+    """账单合同号与订阅一致；旧批次无合同列时按期间起补出合同号，保证可追溯。"""
+    if sub.get("contract_id"):
+        return sub["contract_id"]
+    start = str(sub.get("period_start") or "")
+    try:
+        import datetime as dt
+
+        day = dt.date.fromisoformat(start)
+    except ValueError:
+        return ""
+    return pricing_mod.contract_id_for(str(sub.get("sub_id") or ""), day)
 
 
 def _sum_cents(components: list[dict], kind: str) -> int:
@@ -39,6 +54,12 @@ def build_invoice(sub: dict, segments: list[dict], components: list[dict]) -> di
                       if row["state"] not in config.ZERO_RATE_STATES)
     period_days = int(sub["period_days"])
     free_days = period_days - billed_days
+    model = sub.get("pricing_model") or config.PRICING_LEGACY
+    contract_amount = str(sub.get("contract_amount") or "")
+    cycle_days = int(sub.get("cycle_days") or 0)
+    period_rate = ""
+    if model == config.PRICING_CONTRACT and contract_amount and cycle_days:
+        period_rate = str(pricing_mod.from_sub(sub).period_rate(period_days))
     flags: list[str] = []
     for row in segments:
         for code in row["flags"]:
@@ -65,6 +86,14 @@ def build_invoice(sub: dict, segments: list[dict], components: list[dict]) -> di
         "credit_cents": credit_cents,
         "total_cents": total_cents,
         "exact_total": str(exact_total),
+        "pricing_model": model,
+        "contract_id": contract_id_for(sub),
+        "contract_amount": contract_amount,
+        "cycle_months": int(sub.get("cycle_months") or 0),
+        "cycle_start": str(sub.get("cycle_start") or ""),
+        "cycle_end": str(sub.get("cycle_end") or ""),
+        "cycle_days": cycle_days,
+        "period_rate": period_rate,
         "status": status,
         "flags": flags,
         "source_row": int(sub["row_no"]),
@@ -72,8 +101,15 @@ def build_invoice(sub: dict, segments: list[dict], components: list[dict]) -> di
 
 
 def detail(invoice: dict, segments: list[dict], components: list[dict]) -> dict:
+    model = invoice.get("pricing_model") or config.PRICING_LEGACY
     return {
-        "invoice": {**invoice, "amount": rounding.cents_text(invoice["total_cents"])},
+        "invoice": {
+            **invoice,
+            "amount": rounding.cents_text(invoice["total_cents"]),
+            "pricing_label": config.PRICING_LABELS.get(model, model),
+            "cycle_label": config.CYCLE_LABELS.get(int(invoice.get("cycle_months") or 0),
+                                                   "按月价"),
+        },
         "segments": [{
             **row,
             "amount": rounding.cents_text(row["amount_cents"]),

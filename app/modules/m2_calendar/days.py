@@ -37,6 +37,26 @@ def months_spanned(start: dt.date, end: dt.date) -> int:
     return (end.year - start.year) * 12 + (end.month - start.month) + (1 if end.day else 0)
 
 
+def add_months(day: dt.date, months: int) -> dt.date:
+    """按自然月推进，日号超出目标月长度时夹到月末（1-31 + 1 月 → 2-28/29）。"""
+    total = day.year * 12 + (day.month - 1) + int(months)
+    year, month = divmod(total, 12)
+    month += 1
+    last = month_days(year, month)
+    return dt.date(year, month, min(day.day, last))
+
+
+def cycle_bounds(period_start: dt.date, cycle_months: int) -> tuple[dt.date, dt.date]:
+    """合同周期 ``[周期起, 周期止)``：起点同期间起，长度按周期月数推。"""
+    months = max(int(cycle_months), 1)
+    return period_start, add_months(period_start, months)
+
+
+def cycle_days(period_start: dt.date, cycle_months: int) -> int:
+    start, end = cycle_bounds(period_start, cycle_months)
+    return days(start, end)
+
+
 def range_label(start: dt.date, end: dt.date) -> str:
     return f"[{start.isoformat()}, {end.isoformat()})"
 

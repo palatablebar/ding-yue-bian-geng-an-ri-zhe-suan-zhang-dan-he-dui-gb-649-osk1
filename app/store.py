@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS runs (
     input_digest TEXT NOT NULL DEFAULT '',
     params_json TEXT NOT NULL DEFAULT '{}',
     counters_json TEXT NOT NULL DEFAULT '{}',
+    pricing_model TEXT NOT NULL DEFAULT '',
     note TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_runs_key ON runs(batch_key, status);
@@ -52,6 +53,14 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     state TEXT NOT NULL,
     period_days INTEGER NOT NULL DEFAULT 0,
     leap INTEGER NOT NULL DEFAULT 0,
+    pricing_model TEXT NOT NULL DEFAULT 'legacy_monthly',
+    cycle_months INTEGER NOT NULL DEFAULT 0,
+    cycle_start TEXT NOT NULL DEFAULT '',
+    cycle_end TEXT NOT NULL DEFAULT '',
+    cycle_days INTEGER NOT NULL DEFAULT 0,
+    contract_amount TEXT NOT NULL DEFAULT '',
+    contract_id TEXT NOT NULL DEFAULT '',
+    rate_days INTEGER NOT NULL DEFAULT 0,
     source_file TEXT NOT NULL DEFAULT '',
     row_no INTEGER NOT NULL DEFAULT 0,
     flags_json TEXT NOT NULL DEFAULT '[]'
@@ -99,6 +108,11 @@ CREATE TABLE IF NOT EXISTS segments (
     plan TEXT NOT NULL DEFAULT '',
     state TEXT NOT NULL DEFAULT 'active',
     monthly TEXT NOT NULL DEFAULT '',
+    pricing_model TEXT NOT NULL DEFAULT 'legacy_monthly',
+    contract_id TEXT NOT NULL DEFAULT '',
+    contract_amount TEXT NOT NULL DEFAULT '',
+    cycle_months INTEGER NOT NULL DEFAULT 0,
+    rate_days INTEGER NOT NULL DEFAULT 0,
     amount_exact TEXT NOT NULL DEFAULT '0',
     amount_cents INTEGER NOT NULL DEFAULT 0,
     flags_json TEXT NOT NULL DEFAULT '[]'
@@ -114,6 +128,9 @@ CREATE TABLE IF NOT EXISTS components (
     label TEXT NOT NULL DEFAULT '',
     days INTEGER NOT NULL DEFAULT 0,
     monthly TEXT NOT NULL DEFAULT '',
+    pricing_model TEXT NOT NULL DEFAULT 'legacy_monthly',
+    contract_id TEXT NOT NULL DEFAULT '',
+    rate_days INTEGER NOT NULL DEFAULT 0,
     exact_text TEXT NOT NULL DEFAULT '0',
     cents INTEGER NOT NULL DEFAULT 0,
     flags_json TEXT NOT NULL DEFAULT '[]'
@@ -133,6 +150,14 @@ CREATE TABLE IF NOT EXISTS invoices (
     credit_cents INTEGER NOT NULL,
     total_cents INTEGER NOT NULL,
     exact_total TEXT NOT NULL DEFAULT '0',
+    pricing_model TEXT NOT NULL DEFAULT 'legacy_monthly',
+    contract_id TEXT NOT NULL DEFAULT '',
+    contract_amount TEXT NOT NULL DEFAULT '',
+    cycle_months INTEGER NOT NULL DEFAULT 0,
+    cycle_start TEXT NOT NULL DEFAULT '',
+    cycle_end TEXT NOT NULL DEFAULT '',
+    cycle_days INTEGER NOT NULL DEFAULT 0,
+    period_rate TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'ok',
     flags_json TEXT NOT NULL DEFAULT '[]',
     source_row INTEGER NOT NULL DEFAULT 0
@@ -172,6 +197,61 @@ CREATE TABLE IF NOT EXISTS manifests (
 );
 """
 
+# 增量迁移：旧库已有表时 CREATE TABLE IF NOT EXISTS 不会补列，必须显式 ALTER。
+# 只加列、不改旧行；旧批次读出时新列取默认值（legacy_monthly），历史结果原样可查。
+MIGRATIONS: dict[str, dict[str, str]] = {
+    "runs": {
+        "pricing_model": "TEXT NOT NULL DEFAULT ''",
+    },
+    "subscriptions": {
+        "pricing_model": "TEXT NOT NULL DEFAULT 'legacy_monthly'",
+        "cycle_months": "INTEGER NOT NULL DEFAULT 0",
+        "cycle_start": "TEXT NOT NULL DEFAULT ''",
+        "cycle_end": "TEXT NOT NULL DEFAULT ''",
+        "cycle_days": "INTEGER NOT NULL DEFAULT 0",
+        "contract_amount": "TEXT NOT NULL DEFAULT ''",
+        "contract_id": "TEXT NOT NULL DEFAULT ''",
+        "rate_days": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "segments": {
+        "pricing_model": "TEXT NOT NULL DEFAULT 'legacy_monthly'",
+        "contract_id": "TEXT NOT NULL DEFAULT ''",
+        "contract_amount": "TEXT NOT NULL DEFAULT ''",
+        "cycle_months": "INTEGER NOT NULL DEFAULT 0",
+        "rate_days": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "components": {
+        "pricing_model": "TEXT NOT NULL DEFAULT 'legacy_monthly'",
+        "contract_id": "TEXT NOT NULL DEFAULT ''",
+        "rate_days": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "invoices": {
+        "pricing_model": "TEXT NOT NULL DEFAULT 'legacy_monthly'",
+        "contract_id": "TEXT NOT NULL DEFAULT ''",
+        "contract_amount": "TEXT NOT NULL DEFAULT ''",
+        "cycle_months": "INTEGER NOT NULL DEFAULT 0",
+        "cycle_start": "TEXT NOT NULL DEFAULT ''",
+        "cycle_end": "TEXT NOT NULL DEFAULT ''",
+        "cycle_days": "INTEGER NOT NULL DEFAULT 0",
+        "period_rate": "TEXT NOT NULL DEFAULT ''",
+    },
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> list[str]:
+    """给既有表补列，返回实际新增的列，便于日志与测试核对。"""
+    added: list[str] = []
+    for table, columns in MIGRATIONS.items():
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue
+        for column, ddl in columns.items():
+            if column in existing:
+                continue
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            added.append(f"{table}.{column}")
+    return added
+
 
 def _loads(value: str, fallback):
     try:
@@ -184,8 +264,10 @@ class Store:
     def __init__(self, path: str):
         self.path = str(path)
         Path(self.path).resolve().parent.mkdir(parents=True, exist_ok=True)
+        self.migrations: list[str] = []
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self.migrations = _migrate(conn)
 
     @contextmanager
     def connect(self):
@@ -205,27 +287,32 @@ class Store:
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO runs (run_id, batch_key, status, source, rule_version,
-                        created_at, finished_at, input_digest, params_json, counters_json, note)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                        created_at, finished_at, input_digest, params_json, counters_json,
+                        pricing_model, note)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(run_id) DO UPDATE SET
                      status=excluded.status, finished_at=excluded.finished_at,
                      input_digest=excluded.input_digest,
-                     counters_json=excluded.counters_json""",
+                     counters_json=excluded.counters_json,
+                     pricing_model=excluded.pricing_model,
+                     params_json=excluded.params_json""",
                 (run["run_id"], run["batch_key"], run["status"], run["source"],
                  run["rule_version"], run["created_at"], run.get("finished_at"),
                  run.get("input_digest", ""),
                  json.dumps(run.get("params", {}), ensure_ascii=False),
                  json.dumps(run.get("counters", {}), ensure_ascii=False),
+                 run.get("pricing_model", ""),
                  run.get("note", "")),
             )
 
     def update_run(self, run_id: str, **fields) -> None:
-        allowed = {"status", "finished_at", "input_digest", "counters_json", "note"}
+        allowed = {"status", "finished_at", "input_digest", "counters_json", "note",
+                   "pricing_model", "params_json"}
         sets, values = [], []
         for key, value in fields.items():
             if key not in allowed:
                 continue
-            if key == "counters_json" and not isinstance(value, str):
+            if key in {"counters_json", "params_json"} and not isinstance(value, str):
                 value = json.dumps(value, ensure_ascii=False)
             sets.append(f"{key}=?")
             values.append(value)
@@ -247,6 +334,14 @@ class Store:
                 (batch_key, status)).fetchone()
         return self._run_row(row) if row else None
 
+    def find_any_run_by_key(self, batch_key: str) -> dict | None:
+        """同输入的任何状态批次：用于「上次跑到一半」时复用同一个 run_id 重来。"""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM runs WHERE batch_key=? ORDER BY created_at LIMIT 1",
+                (batch_key,)).fetchone()
+        return self._run_row(row) if row else None
+
     def latest_run(self, status: str | None = None) -> dict | None:
         with self.connect() as conn:
             if status:
@@ -258,6 +353,10 @@ class Store:
                     "SELECT * FROM runs ORDER BY created_at DESC, rowid DESC LIMIT 1"
                 ).fetchone()
         return self._run_row(row) if row else None
+
+    def latest_done_run(self) -> dict | None:
+        """最近一批「完成」的批次：失败的 running 批次不会顶掉上一批可查结果。"""
+        return self.latest_run("done")
 
     def list_runs(self, limit: int = 30) -> list[dict]:
         with self.connect() as conn:
@@ -304,12 +403,20 @@ class Store:
             conn.executemany(
                 """INSERT INTO subscriptions (run_id, sub_id, account, plan, price_text,
                         monthly, period_start, period_end, tz, state, period_days, leap,
+                        pricing_model, cycle_months, cycle_start, cycle_end, cycle_days,
+                        contract_amount, contract_id, rate_days,
                         source_file, row_no, flags_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(run_id, item["sub_id"], item["account"], item["plan"],
                   item["price_text"], str(item["monthly"]), item["period_start"],
                   item["period_end"], item["tz"], item["state"], int(item["period_days"]),
-                  int(item["leap"]), item.get("source_file", ""), int(item.get("row_no", 0)),
+                  int(item["leap"]),
+                  item.get("pricing_model", "legacy_monthly"),
+                  int(item.get("cycle_months", 0)), item.get("cycle_start", ""),
+                  item.get("cycle_end", ""), int(item.get("cycle_days", 0)),
+                  str(item.get("contract_amount", "")), item.get("contract_id", ""),
+                  int(item.get("rate_days", item["period_days"])),
+                  item.get("source_file", ""), int(item.get("row_no", 0)),
                   json.dumps(item.get("flags", []), ensure_ascii=False)) for item in items],
             )
 
@@ -381,11 +488,16 @@ class Store:
             conn.execute("DELETE FROM segments WHERE run_id=?", (run_id,))
             conn.executemany(
                 """INSERT INTO segments (run_id, invoice_id, sub_id, seq, start_date,
-                        end_date, days, plan, state, monthly, amount_exact, amount_cents,
-                        flags_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        end_date, days, plan, state, monthly, pricing_model, contract_id,
+                        contract_amount, cycle_months, rate_days, amount_exact,
+                        amount_cents, flags_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(run_id, item["invoice_id"], item["sub_id"], int(item["seq"]),
                   item["start_date"], item["end_date"], int(item["days"]), item["plan"],
                   item["state"], str(item.get("monthly", "")),
+                  item.get("pricing_model", "legacy_monthly"), item.get("contract_id", ""),
+                  str(item.get("contract_amount", "")), int(item.get("cycle_months", 0)),
+                  int(item.get("rate_days", 0)),
                   str(item.get("amount_exact", "0")), int(item.get("amount_cents", 0)),
                   json.dumps(item.get("flags", []), ensure_ascii=False)) for item in items],
             )
@@ -422,11 +534,14 @@ class Store:
             conn.execute("DELETE FROM components WHERE run_id=?", (run_id,))
             conn.executemany(
                 """INSERT INTO components (run_id, invoice_id, sub_id, seq, kind, source,
-                        label, days, monthly, exact_text, cents, flags_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        label, days, monthly, pricing_model, contract_id, rate_days,
+                        exact_text, cents, flags_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(run_id, item["invoice_id"], item["sub_id"], int(item["seq"]),
                   item["kind"], item.get("source", ""), item.get("label", ""),
                   int(item.get("days", 0)), str(item.get("monthly", "")),
+                  item.get("pricing_model", "legacy_monthly"), item.get("contract_id", ""),
+                  int(item.get("rate_days", 0)),
                   str(item["exact"]), int(item["cents"]),
                   json.dumps(item.get("flags", []), ensure_ascii=False)) for item in items],
             )
@@ -455,13 +570,19 @@ class Store:
             conn.executemany(
                 """INSERT INTO invoices (run_id, invoice_id, sub_id, account, period_start,
                         period_end, period_days, billed_days, free_days, charge_cents,
-                        credit_cents, total_cents, exact_total, status, flags_json, source_row)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        credit_cents, total_cents, exact_total, pricing_model, contract_id,
+                        contract_amount, cycle_months, cycle_start, cycle_end, cycle_days,
+                        period_rate, status, flags_json, source_row)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(run_id, item["invoice_id"], item["sub_id"], item.get("account", ""),
                   item["period_start"], item["period_end"], int(item["period_days"]),
                   int(item["billed_days"]), int(item["free_days"]),
                   int(item["charge_cents"]), int(item["credit_cents"]),
                   int(item["total_cents"]), str(item.get("exact_total", "0")),
+                  item.get("pricing_model", "legacy_monthly"), item.get("contract_id", ""),
+                  str(item.get("contract_amount", "")), int(item.get("cycle_months", 0)),
+                  item.get("cycle_start", ""), item.get("cycle_end", ""),
+                  int(item.get("cycle_days", 0)), str(item.get("period_rate", "")),
                   item.get("status", "ok"),
                   json.dumps(item.get("flags", []), ensure_ascii=False),
                   int(item.get("source_row", 0))) for item in items],

@@ -31,6 +31,15 @@ REASONS: dict[str, tuple[str, str]] = {
     "R_PERIOD_ZERO": ("error", "期间天数为零"),
     "R_TZ_UNKNOWN": ("error", "时区无法解析"),
     "R_STATE_UNKNOWN": ("error", "状态无法识别"),
+    # ---- 计费周期与合同金额 ----
+    "R_CYCLE_UNKNOWN": ("error", "计费周期无法识别"),
+    "R_CYCLE_MISSING": ("error", "缺计费周期，无法按合同期折算"),
+    "R_CONTRACT_MISSING": ("error", "缺合同金额"),
+    "R_CONTRACT_FORMAT": ("error", "合同金额格式无法解析"),
+    "R_CONTRACT_INFERRED": ("info", "月付合同额缺省取月价"),
+    "R_CONTRACT_MISMATCH": ("warn", "月价×周期与合同金额不一致"),
+    "R_CONTRACT_PRORATED": ("info", "本期为合同周期的切片，按周期天数折算"),
+    "R_LEGACY_PRICING": ("info", "旧文件无周期列，按整期月价计价"),
     # ---- 订阅键 ----
     "R_DUP_SUB_KEY": ("error", "订阅号重复且取值冲突"),
     "R_DUP_SUB_ROW": ("info", "订阅号重复且取值相同"),

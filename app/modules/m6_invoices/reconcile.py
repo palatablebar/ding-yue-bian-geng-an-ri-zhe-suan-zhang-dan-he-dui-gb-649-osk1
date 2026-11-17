@@ -105,6 +105,13 @@ def totals(counters: dict, invoices: list[dict], segments: list[dict],
            components: list[dict]) -> dict:
     charge = sum(int(row["cents"]) for row in components if row["kind"] == "charge")
     credit = -sum(int(row["cents"]) for row in components if row["kind"] == "credit")
+    by_model: dict[str, int] = {}
+    for row in invoices:
+        model = row.get("pricing_model") or config.PRICING_LEGACY
+        by_model[model] = by_model.get(model, 0) + 1
+    contract_cents = sum(int(row["total_cents"]) for row in invoices
+                         if (row.get("pricing_model") or config.PRICING_LEGACY)
+                         == config.PRICING_CONTRACT)
     return {
         "subs_kept": int(counters.get("subs_kept", 0)),
         "changes_kept": int(counters.get("changes_kept", 0)),
@@ -122,6 +129,11 @@ def totals(counters: dict, invoices: list[dict], segments: list[dict],
         "credit_cents": credit,
         "invoice_cents": sum(int(row["total_cents"]) for row in invoices),
         "zero_invoices": sum(1 for row in invoices if row["total_cents"] == 0),
+        "legacy_subs": int(counters.get("legacy_subs", 0)),
+        "contract_subs": int(counters.get("contract_subs", 0)),
+        "annual_subs": int(counters.get("annual_subs", 0)),
+        "pricing_models": by_model,
+        "contract_invoice_cents": contract_cents,
         "segment_exact_total": str(sum(
             (Decimal(row["amount_exact"]) for row in segments), Decimal("0"))),
         "money_unit": config.MONEY_UNIT,

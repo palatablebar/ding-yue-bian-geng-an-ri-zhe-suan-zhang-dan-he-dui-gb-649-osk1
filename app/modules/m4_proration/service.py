@@ -25,7 +25,11 @@ def _group(rows: list[dict]) -> dict[str, list[dict]]:
 
 
 def recompute_amounts(store, run_id: str, settings) -> dict:
-    """重算分段金额与抵扣行金额（幂等：同输入同结果）。"""
+    """重算分段金额与抵扣行金额（幂等：同输入同结果）。
+
+    金额分母一律取分段自己的 ``rate_days``：旧文件是期间天数，合同文件是合同周期天数。
+    这样同一张账单里旧订阅与年付订阅可以并存，各自按自己的合同期折算。
+    """
     subs = _sub_index(store, run_id)
     segments = store.list_segments(run_id)
     components = store.list_components(run_id)
@@ -37,11 +41,7 @@ def recompute_amounts(store, run_id: str, settings) -> dict:
     for invoice_id, rows in _group(segments).items():
         sub = subs[rows[0]["sub_id"]]
         period_days = int(sub["period_days"])
-        exacts = [
-            prorate.segment_amount(Decimal(row["monthly"]), int(row["days"]),
-                                   period_days, row["state"])
-            for row in rows
-        ]
+        exacts = [_segment_exact(row, period_days) for row in rows]
         cents = rounding.allocate(exacts)
         for row, exact, value in zip(rows, exacts, cents):
             segment_updates.append({
@@ -68,6 +68,9 @@ def recompute_amounts(store, run_id: str, settings) -> dict:
                 "label": row["label"],
                 "days": row["days"],
                 "monthly": row["monthly"],
+                "pricing_model": row.get("pricing_model", config.PRICING_LEGACY),
+                "contract_id": row.get("contract_id", ""),
+                "rate_days": int(row.get("rate_days") or 0),
                 "exact": row["exact_text"],
                 "cents": value,
                 "flags": row["flags"],
@@ -83,6 +86,19 @@ def recompute_amounts(store, run_id: str, settings) -> dict:
     }
 
 
+def segment_rate(row: dict, period_days: int) -> tuple[Decimal, int]:
+    """分段计价的 (合同额/整期金额, 日价分母)；旧批次缺列时回落到月价与期间天数。"""
+    rate_days = int(row.get("rate_days") or 0) or period_days
+    amount_text = str(row.get("contract_amount") or "")
+    amount = Decimal(amount_text) if amount_text else Decimal(row["monthly"] or "0")
+    return amount, rate_days
+
+
+def _segment_exact(row: dict, period_days: int) -> Decimal:
+    amount, rate_days = segment_rate(row, period_days)
+    return prorate.segment_amount(amount, int(row["days"]), rate_days, row["state"])
+
+
 def segment_rows(store, run_id: str) -> list[dict]:
     """按账单分组的折算明细，页面与接口共用。"""
     subs = _sub_index(store, run_id)
@@ -90,12 +106,16 @@ def segment_rows(store, run_id: str) -> list[dict]:
     for segment in store.list_segments(run_id):
         sub = subs[segment["sub_id"]]
         period_days = int(sub["period_days"])
-        monthly = Decimal(segment["monthly"] or "0")
+        amount, rate_days = segment_rate(segment, period_days)
+        model = segment.get("pricing_model") or config.PRICING_LEGACY
         rows.append({
             **segment,
             "account": sub["account"],
             "period_days": period_days,
-            "daily": str(prorate.daily_rate(monthly, period_days)) if period_days else "0",
+            "pricing_label": config.PRICING_LABELS.get(model, model),
+            "cycle_label": config.CYCLE_LABELS.get(int(segment.get("cycle_months") or 0),
+                                                   "按月价"),
+            "daily": str(prorate.daily_rate(amount, rate_days)) if rate_days else "0",
             "amount": rounding.cents_text(segment["amount_cents"]),
         })
     return rows

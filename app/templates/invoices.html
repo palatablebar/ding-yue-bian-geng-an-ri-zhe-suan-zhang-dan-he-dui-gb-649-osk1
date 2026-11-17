@@ -14,6 +14,7 @@
           <th>账单号</th>
           <th>账户</th>
           <th>期间</th>
+          <th>定价</th>
           <th class="num">期间天数</th>
           <th class="num">计费</th>
           <th class="num">免费</th>
@@ -30,6 +31,10 @@
           <td><code>{{ row.invoice_id }}</code></td>
           <td class="account" title="{{ row.account }}">{{ row.account }}</td>
           <td><code>{{ row.range_label }}</code></td>
+          <td class="nowrap">
+            <span class="tag {% if row.pricing_model == 'contract' %}tag-info{% else %}tag-warn{% endif %}">{{ row.pricing_model|pricing }}</span>
+            {% if row.cycle_months %}<code title="合同 {{ row.contract_id }} · {{ row.contract_label }}">{{ row.cycle_months|cycle }}</code>{% endif %}
+          </td>
           <td class="num">{{ row.period_days }}</td>
           <td class="num">{{ row.billed_days }}</td>
           <td class="num">{{ row.free_days }}</td>

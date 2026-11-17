@@ -11,5 +11,8 @@
 | `subscriptions_blank.csv` | UTF-8 | 空态：全空行 |
 | `subscriptions_quoted.csv` | UTF-8 | 引号内含换行：逻辑行数 = 记录数 |
 | `subscriptions_truncated.csv` | UTF-8 | 截断尾行：引号未闭合 |
+| `subscriptions_contracts.csv` | UTF-8 | 新旧口径混排：月付/季付/年付合同、旧文件行、缺合同额、月价与合同额不符、闰年年付 |
+| `changes_contracts.csv` | UTF-8 | 合同口径下的期内升配 |
 
 主样例里有 16 条订阅记录（其中 6 条会被隔离）、14 条变更记录（其中 1 条未知订阅被隔离）。
+合同样例里有 8 条订阅记录（其中 2 条缺合同额被隔离）、1 条变更记录。

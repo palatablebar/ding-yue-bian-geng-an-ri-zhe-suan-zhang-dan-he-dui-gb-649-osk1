@@ -2,6 +2,7 @@
 
 - 规模：中型（7 个功能模块，74–80 个文件，测试 ≥53）
 - 核心规则：期间 `[start, end)` 的实际天数做分母，变更切段后「预缴整期 − 未用额度抵扣 + 新价补收」，尾差按最大余额法分到 0.01
+- 定价口径：旧文件按月价整期计价；带计费周期的文件按「合同额 × 账期天数 ÷ 合同周期天数」折算，年付不会被放大十二倍
 - 使用者与工作流：SaaS 计费运营每月把订阅与变更两份导出文件拖进系统，先看隔离区确认哪些行不可用，再逐张核账单，最后导出账单与运行清单归档
 
 ## 功能模块
@@ -11,7 +12,7 @@
 | M1 订阅采信 | 选两份样例文件采信，看编码与列数诊断 | POST /api/subscriptions/import | `app/modules/m1_ingest/reader.py` `app/modules/m1_ingest/columns.py` `app/modules/m1_ingest/service.py` | `tests/test_ingest.py` `tests/test_ingest_columns.py` |
 | M2 期间日历 | 查每个订阅的期间天数、闰日与半开区间 | GET /api/calendar | `app/modules/m2_calendar/days.py` `app/modules/m2_calendar/halfopen.py` | `tests/test_calendar.py` `tests/test_calendar_dst.py` |
 | M3 质量隔离 | 看原因码分布、原始行号与原值，导出隔离 CSV | GET /api/quarantine | `app/modules/m3_quality/rules.py` `app/modules/m3_quality/quarantine.py` | `tests/test_quality.py` `tests/test_quality_money.py` |
-| M4 按日折算 | 看每段日价与金额，必要时重算 | GET /api/proration | `app/modules/m4_proration/prorate.py` `app/modules/m4_proration/rounding.py` | `tests/test_proration.py` `tests/test_rounding.py` |
+| M4 按日折算 | 看每段日价与金额，必要时重算 | GET /api/proration | `app/modules/m4_proration/prorate.py` `app/modules/m4_proration/rounding.py` `app/modules/m4_proration/pricing.py` | `tests/test_proration.py` `tests/test_rounding.py` `tests/test_contracts.py` |
 | M5 变更抵扣 | 看变更序列、被替代关系与抵扣行 | GET /api/changes | `app/modules/m5_changes/segments.py` `app/modules/m5_changes/credit.py` | `tests/test_changes.py` `tests/test_credit.py` |
 | M6 账单对账 | 出账、点行看明细、核对四本账 | GET /api/invoices | `app/modules/m6_invoices/invoice.py` `app/modules/m6_invoices/reconcile.py` | `tests/test_invoices.py` `tests/test_reconcile.py` |
 | M7 导出 | 导出账单 CSV、分段 CSV、运行清单 JSON | GET /api/export/invoices.csv | `app/modules/m7_export/csv_out.py` `app/modules/m7_export/manifest_out.py` | `tests/test_export.py` `tests/test_export_manifest.py` |
@@ -33,6 +34,11 @@
 | TRAP-23 | 期间端点归属与相邻段接缝 | 两端都算，重复计一天 | 半开 `[start, end)`，相邻段 end 等于下段 start | `app/modules/m5_changes/segments.py`、`app/modules/m2_calendar/days.py` | `tests/test_calendar.py::test_adjacent_segments_cover_period`、`tests/test_changes.py::test_change_on_period_start_zero_day_segment` |
 | TRAP-24 | 抵扣行、补收行各自四舍五入 | 分完合计比总额多 1 分 | 最大余额法把差额补到小数余额最大的分量，负数抵扣同样成立 | `app/modules/m4_proration/rounding.py` | `tests/test_rounding.py::test_largest_remainder_keeps_total`、`tests/test_credit.py::test_component_cents_sum_to_invoice` |
 | TRAP-25 | 同一订阅同一时刻两条变更 | 取到哪条看文件顺序，重跑结果会变 | 同日只让 (生效时刻, 变更号) 最小的一条生效，其余标 `R_CHANGE_OVERLAP` 并记替代关系 | `app/modules/m3_quality/service.py`、`app/modules/m5_changes/segments.py` | `tests/test_changes.py::test_same_instant_overlap_deterministic`、`tests/test_invariants.py::test_change_order_independence` |
+| TRAP-26 | 导出新增计费周期与合同金额，期内月付与年付混排 | 把年价当月价，整期金额放大十二倍；或按批拆算，合同/账单/导出金额断链 | 逐行决定口径：旧文件月价为整期金额；合同文件「合同额 × 账期天数 ÷ 合同周期天数」，账期等于周期时精确等于合同额 | `app/modules/m4_proration/pricing.py`、`app/modules/m3_quality/service.py` | `tests/test_contracts.py::test_annual_not_inflated`、`tests/test_contracts.py::test_mixed_legacy_and_contract_in_one_batch` |
+| TRAP-27 | 旧文件没有新列，新增列被当必需列 | 整份文件判 `R_HEADER_MISSING` 隔离，一行都不出账 | 新列登记为可选列；缺列按旧口径继续，旧结果与 1.0.0 逐字一致 | `app/modules/m1_ingest/columns.py`、`app/modules/m3_quality/service.py` | `tests/test_contracts.py::test_legacy_file_has_no_contract_columns`、`tests/test_ingest_columns.py` |
+| TRAP-28 | 期内变更时合同周期随变更移动 | 同一张账单出现两个日价分母，尾差对不平或金额翻倍 | 变更只重定合同额（新月价×周期月数），周期起点与天数不变，全账单共用一个分母 | `app/modules/m4_proration/pricing.py::reprice`、`app/modules/m5_changes/credit.py` | `tests/test_contracts.py::test_monthly_change_inside_annual_style_cycle` |
+| TRAP-29 | 旧库没有新列就上线 | `SELECT` 缺列报错，历史批次全部打不开 | 启动时增量 `ALTER TABLE ADD COLUMN`，只加列不改旧行，旧批次读出按 `legacy_monthly` 解释 | `app/store.py::_migrate` | `tests/test_contracts.py::test_migration_adds_columns_to_legacy_db` |
+| TRAP-30 | 采信中途失败 / 同一文件重跑 | 半批数据入库被当账单；或同一文件重复出账 | 失败清本批派生表并标 `failed`，不删批次、不动上一批；同输入重跑命中 `done` 批次复用，`failed` 批次复用同一 `run_id` 重试 | `app/modules/m1_ingest/service.py`、`app/store.py::latest_done_run` | `tests/test_contracts.py::test_failed_batch_keeps_previous_result`、`tests/test_contracts.py::test_failed_batch_is_reused_on_retry`、`tests/test_contracts.py::test_same_file_rerun_does_not_double_bill` |
 
 ## 对账规则
 

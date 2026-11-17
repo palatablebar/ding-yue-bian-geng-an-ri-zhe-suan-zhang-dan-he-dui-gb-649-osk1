@@ -36,7 +36,8 @@ def _lookup(text: str, spec: dict) -> str | None:
     return None
 
 
-def map_header(header: list[str], spec: dict) -> HeaderMap:
+def map_header(header: list[str], spec: dict,
+               optional: tuple[str, ...] = ()) -> HeaderMap:
     result = HeaderMap()
     for index, name in enumerate(header):
         canonical = _lookup(name, spec)
@@ -44,16 +45,18 @@ def map_header(header: list[str], spec: dict) -> HeaderMap:
             result.unknown.append(name)
         elif canonical not in result.canonical:
             result.canonical[canonical] = index
-    result.missing = [key for key in spec if key not in result.canonical]
+    # 可选列缺失不算「缺列」：旧文件没有合同列是合法形态，不能因此整份隔离。
+    result.missing = [key for key in spec
+                      if key not in result.canonical and key not in optional]
     return result
 
 
 def sub_header(header: list[str]) -> HeaderMap:
-    return map_header(header, config.SUB_COLUMNS)
+    return map_header(header, config.SUB_COLUMNS, SUB_OPTIONAL)
 
 
 def change_header(header: list[str]) -> HeaderMap:
-    return map_header(header, config.CHANGE_COLUMNS)
+    return map_header(header, config.CHANGE_COLUMNS, CHANGE_OPTIONAL)
 
 
 def required_missing(mapping: HeaderMap, required: tuple[str, ...]) -> list[str]:
@@ -62,6 +65,9 @@ def required_missing(mapping: HeaderMap, required: tuple[str, ...]) -> list[str]
 
 SUB_REQUIRED = ("sub_id", "price", "period_start", "period_end", "state")
 CHANGE_REQUIRED = ("change_id", "sub_id", "effective", "kind")
+# 新增列一律可选：旧导出没有它们，缺失时必须按旧口径继续，不能隔离整份文件。
+SUB_OPTIONAL = ("billing_cycle", "contract_amount")
+CHANGE_OPTIONAL: tuple[str, ...] = ()
 
 
 def looks_like_header(fields: list[str], spec: dict) -> bool:

@@ -170,6 +170,37 @@ def normalize_kind(text: str) -> Parsed:
     return Parsed(value) if value else Parsed(None, "R_CHANGE_KIND")
 
 
+def normalize_cycle(text: str) -> Parsed:
+    """计费周期：认月付/季付/半年付/年付，也认 1/3/6/12 个月。
+
+    返回值为周期月数；空值与哨兵返回 ``None``（由调用方决定是旧文件还是缺列）。
+    """
+    raw = to_halfwidth((text or "").strip())
+    if _is_sentinel(raw):
+        return Parsed(None)
+    clean = raw.replace(" ", "").lower()
+    value = config.CYCLE_MONTHS.get(clean)
+    if value is None and clean.endswith("个月"):
+        head = clean[:-2]
+        if head.isdigit():
+            value = int(head)
+    if value is None and clean.isdigit():
+        value = int(clean)
+    if value is None or value <= 0:
+        return Parsed(None, "R_CYCLE_UNKNOWN")
+    return Parsed(value)
+
+
+def contract_amount(text: str) -> Parsed:
+    """合同金额：与月价同一套归一规则，但原因码独立，便于运营区分缺价与缺合同额。"""
+    parsed = normalize_money(text)
+    if parsed.code == "R_PRICE_MISSING":
+        return Parsed(None, "R_CONTRACT_MISSING", parsed.flags)
+    if parsed.code == "R_PRICE_FORMAT":
+        return Parsed(None, "R_CONTRACT_FORMAT", parsed.flags)
+    return parsed
+
+
 def change_price(kind: str, text: str) -> Parsed:
     """变更后的月价：暂停/取消一律计 0；恢复允许沿用旧价。"""
     if kind in {"pause", "cancel"}:

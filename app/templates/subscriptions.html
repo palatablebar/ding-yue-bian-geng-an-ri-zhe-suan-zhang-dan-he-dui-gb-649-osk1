@@ -88,6 +88,8 @@
           <th>账户</th>
           <th>套餐</th>
           <th class="num">月价(元)</th>
+          <th>定价</th>
+          <th class="num">合同金额(元)</th>
           <th>期间</th>
           <th class="num">天数</th>
           <th>时区</th>
@@ -103,6 +105,10 @@
           <td class="account" title="{{ sub.account }}">{{ sub.account }}</td>
           <td>{{ sub.plan }}</td>
           <td class="num">{{ sub.monthly|amount }}</td>
+          <td class="nowrap">
+            <span class="tag {% if sub.pricing_model == 'contract' %}tag-info{% else %}tag-warn{% endif %}">{{ sub.pricing_model|pricing }}</span>
+          </td>
+          <td class="num">{{ sub.contract_amount|amount if sub.contract_amount else "—" }}{% if sub.cycle_months %}<br><code title="{{ sub.contract_id }}">{{ sub.cycle_months|cycle }}</code>{% endif %}</td>
           <td><code>[{{ sub.period_start }}, {{ sub.period_end }})</code></td>
           <td class="num">{{ sub.period_days }}</td>
           <td><code>{{ sub.tz }}</code></td>

@@ -34,6 +34,15 @@ def leap_of(period_start: str, period_end: str) -> bool:
     return days_mod.contains_leap_day(start, end)
 
 
+def cycle_bounds(period_start: str, cycle_months: int) -> tuple[dt.date, dt.date]:
+    start = dt.date.fromisoformat(period_start)
+    return days_mod.cycle_bounds(start, cycle_months)
+
+
+def cycle_days(period_start: str, cycle_months: int) -> int:
+    return days_mod.cycle_days(dt.date.fromisoformat(period_start), cycle_months)
+
+
 def period_rows(store, run_id: str) -> list[dict]:
     """按订阅输出期间日历行：天数、闰日、半开区间标签。"""
     rows = []

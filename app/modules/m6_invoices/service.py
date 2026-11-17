@@ -64,6 +64,8 @@ def invoice_rows(store, run_id: str) -> list[dict]:
     rows = []
     for row in store.list_invoices(run_id):
         sub = subs.get(row["sub_id"], {})
+        model = row.get("pricing_model") or config.PRICING_LEGACY
+        cycle_months = int(row.get("cycle_months") or 0)
         rows.append({
             **row,
             "amount": rounding.cents_text(row["total_cents"]),
@@ -71,6 +73,11 @@ def invoice_rows(store, run_id: str) -> list[dict]:
             "credit": rounding.cents_text(row["credit_cents"]),
             "leap": bool(sub.get("leap", 0)),
             "range_label": f"[{row['period_start']}, {row['period_end']})",
+            "pricing_label": config.PRICING_LABELS.get(model, model),
+            "cycle_label": config.CYCLE_LABELS.get(cycle_months, "按月价"),
+            "contract_label": (f"[{row['cycle_start']}, {row['cycle_end']})"
+                               if row.get("cycle_start") and row.get("cycle_end")
+                               else f"[{row['period_start']}, {row['period_end']})"),
         })
     return rows
 

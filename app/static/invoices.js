@@ -37,26 +37,29 @@ function renderInvoice(body, data) {
   const invoice = data.invoice;
   const head = el("div", "block-head");
   head.appendChild(el("h3", "", "分段"));
+  const contract = invoice.pricing_model === "contract"
+    ? ` · 合同 ${invoice.contract_id} · ${invoice.cycle_label} ${invoice.contract_amount} 元 / [${invoice.cycle_start}, ${invoice.cycle_end})`
+    : " · 月价（旧文件）";
   head.appendChild(el("span", "sub",
-    `${invoice.period_days} 天 · ${invoice.amount} 元 · 分段 ${data.segments.length} · 抵扣行 ${data.components.length}`));
+    `${invoice.period_days} 天 · ${invoice.amount} 元 · 分段 ${data.segments.length} · 抵扣行 ${data.components.length}${contract}`));
   body.appendChild(head);
 
   body.appendChild(buildTable(
     [["起", false], ["止", false], ["天数", true], ["套餐", false], ["状态", false],
-     ["月价(元)", true], ["金额(元)", true]],
+     ["月价(元)", true], ["日价分母(天)", true], ["金额(元)", true]],
     data.segments.map((row) => [
       [row.start_date, false], [row.end_date, false], [row.days, true],
       [row.plan, false], [row.state_label || row.state, false],
-      [row.monthly, true], [row.amount, true],
+      [row.monthly, true], [row.rate_days || "—", true], [row.amount, true],
     ]),
   ));
 
   body.appendChild(el("h3", "", "抵扣行"));
   body.appendChild(buildTable(
-    [["类型", false], ["来源", false], ["天数", true], ["金额(元)", true]],
+    [["类型", false], ["来源", false], ["天数", true], ["日价分母(天)", true], ["金额(元)", true]],
     data.components.map((row) => [
       [row.kind === "charge" ? "补收" : "抵扣", false], [row.label, false],
-      [row.days, true], [row.amount, true],
+      [row.days, true], [row.rate_days || "—", true], [row.amount, true],
     ]),
   ));
 }

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from ... import config, reasons
+from ..m4_proration import pricing as pricing_mod
 
 
 @dataclass
@@ -25,6 +26,7 @@ class Segment:
     monthly: Decimal
     flags: list[str] = field(default_factory=list)
     change_id: str = ""
+    pricing: pricing_mod.Pricing | None = None
 
 
 def parse_price(value) -> Decimal:
@@ -38,16 +40,25 @@ def initial_state(sub: dict) -> tuple[str, str, Decimal]:
     return sub["plan"], sub["state"], parse_price(sub["monthly"])
 
 
-def apply_change(plan: str, monthly: Decimal, change: dict) -> tuple[str, str, Decimal]:
-    """按变更类型推出新的 (套餐, 状态, 月价)。"""
+def apply_change(plan: str, monthly: Decimal, change: dict,
+                 pricing: pricing_mod.Pricing | None = None,
+                 ) -> tuple[str, str, Decimal, pricing_mod.Pricing | None]:
+    """按变更类型推出新的 (套餐, 状态, 月价, 定价)。
+
+    合同口径下新月价由「新月价 × 周期月数」重定合同额；旧口径保持新月价即整期金额。
+    """
     kind = change["kind"]
     state = config.KIND_EFFECT[kind]
     new_plan = change["new_plan"] or plan
-    price = parse_price(change["new_price"]) if change["new_price"] not in ("", None) else monthly
+    has_price = change["new_price"] not in ("", None)
+    price = parse_price(change["new_price"]) if has_price else monthly
     if kind in {"pause", "cancel"}:
         new_plan = plan
         price = monthly
-    return new_plan, state, price
+        return new_plan, state, price, pricing_mod.carry(pricing) if pricing else None
+    if not has_price or pricing is None:
+        return new_plan, state, price, pricing_mod.carry(pricing) if pricing else None
+    return new_plan, state, price, pricing_mod.reprice(pricing, price)
 
 
 def applicable_changes(sub: dict, changes: list[dict]) -> list[dict]:
@@ -67,19 +78,20 @@ def build_segments(sub: dict, changes: list[dict]) -> list[Segment]:
     start = dt.date.fromisoformat(sub["period_start"])
     end = dt.date.fromisoformat(sub["period_end"])
     plan, state, monthly = initial_state(sub)
+    pricing = pricing_mod.from_sub(sub)
     segments: list[Segment] = []
     cursor = start
     for change in applicable_changes(sub, changes):
         day = dt.date.fromisoformat(change["local_date"])
         segments.append(Segment(
             seq=len(segments), start=cursor, end=day, days=max((day - cursor).days, 0),
-            plan=plan, state=state, monthly=monthly,
+            plan=plan, state=state, monthly=monthly, pricing=pricing,
         ))
-        plan, state, monthly = apply_change(plan, monthly, change)
+        plan, state, monthly, pricing = apply_change(plan, monthly, change, pricing)
         cursor = day
     segments.append(Segment(
         seq=len(segments), start=cursor, end=end, days=max((end - cursor).days, 0),
-        plan=plan, state=state, monthly=monthly,
+        plan=plan, state=state, monthly=monthly, pricing=pricing,
     ))
     # 段标记：段由哪条变更开启就带上那条变更的复核标记（info 级留在订阅与价格层）
     flag_by_day: dict[str, tuple[str, list[str]]] = {}
@@ -101,6 +113,7 @@ def billable_segments(segments: list[Segment]) -> list[Segment]:
 def segment_rows(invoice_id: str, sub: dict, segments: list[Segment]) -> list[dict]:
     rows = []
     for index, segment in enumerate(billable_segments(segments)):
+        pricing = segment.pricing
         rows.append({
             "invoice_id": invoice_id,
             "sub_id": sub["sub_id"],
@@ -111,11 +124,25 @@ def segment_rows(invoice_id: str, sub: dict, segments: list[Segment]) -> list[di
             "plan": segment.plan,
             "state": segment.state,
             "monthly": str(segment.monthly),
+            "pricing_model": pricing.model if pricing else config.PRICING_LEGACY,
+            "contract_id": _contract_id(sub, pricing),
+            "contract_amount": str(pricing.contract_amount) if pricing else "",
+            "cycle_months": pricing.cycle_months if pricing else 0,
+            "rate_days": pricing.rate_days if pricing else 0,
             "amount_exact": "0",
             "amount_cents": 0,
             "flags": segment.flags,
         })
     return rows
+
+
+def _contract_id(sub: dict, pricing: pricing_mod.Pricing | None) -> str:
+    """合同号挂在订阅的合同周期上，不随变更换段而变，保证账单/分段同一份合同。"""
+    if sub.get("contract_id"):
+        return sub["contract_id"]
+    if pricing is None or pricing.cycle_start is None:
+        return ""
+    return pricing_mod.contract_id_for(sub["sub_id"], pricing.cycle_start)
 
 
 def day_ledger(segments: list[Segment]) -> dict:

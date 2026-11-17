@@ -90,53 +90,73 @@ def import_sample(store, settings, subscriptions: str | None = None,
     ])
     existing = store.find_run_by_key(key)
     if existing is not None:
+        # 同一份文件重跑：命中已完成批次，直接返回，不新增账单。
         data = summary(store, existing)
         data["reused"] = True
         return data
 
+    # 上次同输入跑到一半（failed/running）：复用它的 run_id 重来，不堆新批次。
+    pending = store.find_any_run_by_key(key)
+    run_id = pending["run_id"] if pending else manifest.new_run_id()
+
     started_at = _now()
     clock = time.perf_counter()
-    run_id = manifest.new_run_id()
     store.create_run({
         "run_id": run_id,
         "batch_key": key,
         "status": "running",
         "source": f"{sub_table.name} + {change_table.name}",
         "rule_version": settings.rule_version,
-        "created_at": started_at,
+        "created_at": pending["created_at"] if pending else started_at,
         "params": {"subscriptions": sub_table.name, "changes": change_table.name,
-                   "display_tz": settings.display_tz},
+                   "display_tz": settings.display_tz,
+                   "pricing_model": config.PRICING_MODEL},
+        "pricing_model": config.PRICING_MODEL,
     })
     store.put_inputs(run_id, _inputs(sub_table, change_table))
 
-    prepared = quality_service.prepare(store, run_id, sub_table, change_table, settings)
-    counters = dict(prepared["counters"])
-    store.update_run(run_id, counters_json=counters)
+    try:
+        prepared = quality_service.prepare(store, run_id, sub_table, change_table,
+                                           settings)
+        counters = dict(prepared["counters"])
+        store.update_run(run_id, counters_json=counters,
+                         pricing_model=config.PRICING_MODEL)
 
-    built = change_service.rebuild(store, run_id, settings)
-    amounts = proration_service.recompute_amounts(store, run_id, settings)
-    invoices = invoice_service.rebuild(store, run_id, settings)
-    totals = dict(invoices["totals"])
-    totals["segment_exact_total"] = amounts["segment_exact_total"]
+        built = change_service.rebuild(store, run_id, settings)
+        amounts = proration_service.recompute_amounts(store, run_id, settings)
+        invoices = invoice_service.rebuild(store, run_id, settings)
+        totals = dict(invoices["totals"])
+        totals["segment_exact_total"] = amounts["segment_exact_total"]
+        totals["pricing_models"] = counters.get("pricing_models", {})
+        totals["pricing_model"] = config.PRICING_MODEL
 
-    stages = _stages(counters, totals, built, prepared)
-    store.put_stages(run_id, stages)
+        stages = _stages(counters, totals, built, prepared)
+        store.put_stages(run_id, stages)
 
-    digest = manifest.digest_parts([item["sha256"] for item in _inputs(
-        sub_table, change_table)])
-    finished_at = _now()
-    elapsed_ms = int((time.perf_counter() - clock) * 1000)
-    store.update_run(run_id, status="done", finished_at=finished_at, input_digest=digest)
-    data = manifest.build(
-        run_id=run_id, batch_key=key, settings=settings,
-        inputs=_inputs(sub_table, change_table),
-        params={"display_tz": settings.display_tz,
-                "subscriptions": sub_table.name, "changes": change_name},
-        started_at=started_at, finished_at=finished_at, elapsed_ms=elapsed_ms,
-        stages=stages, counters=counters, totals=totals,
-        reconciliations=invoices["ledgers"],
-    )
-    store.put_manifest(run_id, data)
+        digest = manifest.digest_parts([item["sha256"] for item in _inputs(
+            sub_table, change_table)])
+        finished_at = _now()
+        elapsed_ms = int((time.perf_counter() - clock) * 1000)
+        store.update_run(run_id, status="done", finished_at=finished_at,
+                         input_digest=digest, counters_json=counters)
+        data = manifest.build(
+            run_id=run_id, batch_key=key, settings=settings,
+            inputs=_inputs(sub_table, change_table),
+            params={"display_tz": settings.display_tz,
+                    "subscriptions": sub_table.name, "changes": change_name,
+                    "pricing_model": config.PRICING_MODEL},
+            started_at=started_at, finished_at=finished_at, elapsed_ms=elapsed_ms,
+            stages=stages, counters=counters, totals=totals,
+            reconciliations=invoices["ledgers"],
+        )
+        store.put_manifest(run_id, data)
+    except Exception as exc:
+        # 失败：清掉本批派生表并把批次标 failed；不删批次、不动上一批。
+        # 页面默认取最近 done 批次，因此上一批结果仍可查。
+        store.clear_derived(run_id)
+        store.update_run(run_id, status="failed", finished_at=_now(),
+                         note=f"{type(exc).__name__}: {exc}"[:500])
+        raise
 
     run = store.get_run(run_id) or {"run_id": run_id, "batch_key": key,
                                     "status": "done", "created_at": started_at,

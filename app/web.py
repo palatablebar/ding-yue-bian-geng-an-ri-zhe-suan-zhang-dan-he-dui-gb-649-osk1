@@ -80,7 +80,9 @@ class Ctx:
     def current_run(self, run_id: str | None = None) -> dict | None:
         if run_id:
             return self.store.get_run(run_id)
-        return self.store.latest_run()
+        # 默认取最近一批「完成」的批次：失败批次只出现在批次清单里，
+        # 不会把上一批可查的账单顶掉。
+        return self.store.latest_done_run() or self.store.latest_run()
 
     def require_run(self, run_id: str | None = None) -> dict | None:
         return self.current_run(run_id)
@@ -124,6 +126,8 @@ def page_context(ctx: Ctx, run_id: str | None, active: str) -> dict:
         "kind_labels": config.KIND_LABELS,
         "invoice_status_labels": config.INVOICE_STATUS_LABELS,
         "run_status_labels": config.RUN_STATUS_LABELS,
+        "pricing_labels": config.PRICING_LABELS,
+        "cycle_labels": config.CYCLE_LABELS,
         "money_unit": config.MONEY_UNIT,
         "column_labels": {
             **{key: label for key, (label, _) in config.SUB_COLUMNS.items()},
@@ -153,6 +157,9 @@ def setup(app) -> None:
     env.filters["kind"] = lambda k: config.KIND_LABELS.get(k, k or "—")
     env.filters["invoice_status"] = lambda s: config.INVOICE_STATUS_LABELS.get(s, s or "—")
     env.filters["run_status"] = lambda s: config.RUN_STATUS_LABELS.get(s, s or "—")
+    env.filters["pricing"] = lambda s: config.PRICING_LABELS.get(s, s or "—")
+    env.filters["cycle"] = lambda months: config.CYCLE_LABELS.get(
+        int(months or 0), "按月价" if not months else f"{int(months)}个月")
     env.filters["flags"] = lambda items: [reasons.label_of(code) for code in (items or [])]
     env.filters["flag_codes"] = lambda items: list(items or [])
     app.state.templates = t

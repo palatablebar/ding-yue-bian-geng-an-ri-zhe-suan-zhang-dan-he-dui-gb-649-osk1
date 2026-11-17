@@ -18,6 +18,10 @@ UTC = dt.timezone.utc
 DISPLAY_TZ = "Asia/Shanghai"
 
 RULE_VERSION = "subbill/1.0.0"
+# 定价模型版本：旧导出只有月价（legacy-monthly），新导出带计费周期与合同金额
+# （contract-aware）。旧文件结果与 1.0.0 逐字一致，因此规则版本保持不变；
+# 模型版本单独记录在运行清单里，便于审计「这批账单用的是哪套定价口径」。
+PRICING_MODEL = "contract-aware/1"
 CENT = Decimal("0.01")
 DECIMAL_PREC = 34
 MONEY_UNIT = "元"
@@ -38,11 +42,34 @@ SUB_COLUMNS = {
     "account": ("账户", ("账户", "客户名称", "客户", "账户名")),
     "plan": ("套餐", ("套餐", "套餐名", "产品")),
     "price": ("月价(元)", ("月价(元)", "月价", "单价", "月价格")),
+    "billing_cycle": ("计费周期", ("计费周期", "周期", "付款周期", "billing_cycle", "cycle")),
+    "contract_amount": ("合同金额(元)", ("合同金额(元)", "合同金额", "合同额",
+                                        "contract_amount", "contract")),
     "period_start": ("期间起", ("期间起", "计费起", "起租日")),
     "period_end": ("期间止", ("期间止", "计费止", "到期日")),
     "tz": ("时区", ("时区", "地区时区", "timezone")),
     "state": ("状态", ("状态", "订阅状态")),
 }
+
+# 计费周期：声明「一个完整合同周期」有几个月。合同金额按这个周期计价，
+# 账单期只是合同周期的一个切片（月付通常切片 == 周期，年付通常切片 < 周期）。
+CYCLE_MONTHS = {
+    "月付": 1, "月": 1, "月度": 1, "monthly": 1, "month": 1, "1": 1, "1个月": 1,
+    "季付": 3, "季度": 3, "quarterly": 3, "quarter": 3, "3": 3, "3个月": 3,
+    "半年付": 6, "半年": 6, "semi-annual": 6, "semiannual": 6, "6": 6, "6个月": 6,
+    "年付": 12, "年": 12, "年度": 12, "annual": 12, "yearly": 12, "year": 12,
+    "12": 12, "12个月": 12,
+}
+CYCLE_LABELS = {1: "月付", 3: "季付", 6: "半年付", 12: "年付"}
+# 定价口径：旧文件只有月价，新文件带周期与合同金额
+PRICING_LEGACY = "legacy_monthly"
+PRICING_CONTRACT = "contract"
+PRICING_LABELS = {
+    PRICING_LEGACY: "月价（旧文件）",
+    PRICING_CONTRACT: "合同期计价",
+}
+# 月价 × 周期月数 与合同金额的允许差额（元）；超过即留复核标记
+CONTRACT_TOLERANCE = Decimal("0.01")
 
 CHANGE_COLUMNS = {
     "change_id": ("变更号", ("变更号", "变更ID", "变更编号")),

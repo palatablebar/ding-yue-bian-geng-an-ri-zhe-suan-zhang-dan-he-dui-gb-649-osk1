@@ -19,6 +19,8 @@
           <th>套餐</th>
           <th>状态</th>
           <th class="num">月价(元)</th>
+          <th>定价</th>
+          <th class="num">日价分母(天)</th>
           <th class="num">日价(元)</th>
           <th class="num">金额(元)</th>
           <th>标记</th>
@@ -35,6 +37,11 @@
           <td>{{ row.plan }}</td>
           <td>{{ row.state|state }}</td>
           <td class="num">{{ row.monthly|amount }}</td>
+          <td class="nowrap">
+            <span class="tag {% if row.pricing_model == 'contract' %}tag-info{% else %}tag-warn{% endif %}">{{ row.pricing_model|pricing }}</span>
+            {% if row.cycle_months %}<code title="{{ row.contract_id }}">{{ row.cycle_months|cycle }}</code>{% endif %}
+          </td>
+          <td class="num">{{ row.rate_days }}</td>
           <td class="num">{{ row.daily[:10] }}</td>
           <td class="num">{{ row.amount }}</td>
           <td>

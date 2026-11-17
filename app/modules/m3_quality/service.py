@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from ... import config
@@ -13,6 +14,7 @@ from ... import reasons
 from ...reasons import level_of
 from ..m1_ingest import columns as column_mod
 from ..m2_calendar import service as calendar_service
+from ..m4_proration import pricing as pricing_mod
 from . import quarantine, rules
 
 REQUIRED_SUB = column_mod.SUB_REQUIRED
@@ -55,14 +57,90 @@ def _file_entries(table, mapping, required: tuple[str, ...]) -> list[dict]:
 
 FATAL_STATES = ("R_EMPTY_FILE", "R_HEADER_ONLY", "R_BLANK_ROWS")
 REVIEW_FLAGS = ("R_LATE_CHANGE", "R_TIME_TRUNCATED", "R_DST_AMBIGUOUS", "R_DST_GAP",
-                "R_CHANGE_OUT_OF_PERIOD", "R_CHANGE_ON_PERIOD_START")
+                "R_CHANGE_OUT_OF_PERIOD", "R_CHANGE_ON_PERIOD_START",
+                "R_CONTRACT_MISMATCH", "R_CONTRACT_INFERRED")
 
 
 def _signature(record: dict) -> tuple:
     return (
         record["account"], record["plan"], str(record["monthly"]),
         record["period_start"], record["period_end"], record["tz"], record["state"],
+        record.get("pricing_model", ""), int(record.get("cycle_months", 0)),
+        str(record.get("contract_amount", "")),
     )
+
+
+def _resolve_pricing(mapping, row, price, period_start: dt.date, period_days: int,
+                     reject) -> dict | None:
+    """决定这一行按旧口径还是合同口径计价；不可用的行返回 None（已由 reject 记码）。
+
+    兼容规则：
+    - 两列都没有 → 旧文件，月价即整期金额，金额与 1.0.0 逐字一致；
+    - 有周期无合同额：月付可用月价补出合同额（info），季付/年付缺合同额隔离；
+    - 有合同额无周期：无法知道合同覆盖几个月，隔离，绝不猜；
+    - 两列都有：按合同金额计价；月价×周期与合同额差额超 1 分留复核标记。
+    """
+    cycle_text = mapping.value(row.fields, "billing_cycle")
+    amount_text = mapping.value(row.fields, "contract_amount")
+    cycle_raw = (cycle_text or "").strip()
+    amount_raw = (amount_text or "").strip()
+    if not cycle_raw and not amount_raw:
+        flags = list(price.flags) + ["R_LEGACY_PRICING"]
+        return {
+            "monthly": price.value,
+            "contract_amount": price.value,
+            "pricing_model": config.PRICING_LEGACY,
+            "cycle_months": 0,
+            "cycle_start": "",
+            "cycle_end": "",
+            "cycle_days": period_days,
+            "rate_days": period_days,
+            "contract_id": "",
+            "flags": flags,
+        }
+
+    cycle = rules.normalize_cycle(cycle_raw)
+    if cycle.code:
+        reject(row.row_no, cycle.code, field="计费周期", raw=cycle_raw)
+        return None
+    if cycle.value is None:
+        reject(row.row_no, "R_CYCLE_MISSING", field="计费周期", raw=cycle_raw)
+        return None
+    amount = rules.contract_amount(amount_raw)
+    flags = list(price.flags) + list(amount.flags)
+    if amount.value is None and amount.code != "R_CONTRACT_MISSING":
+        reject(row.row_no, amount.code, field="合同金额", raw=amount_raw)
+        return None
+    contract_value = amount.value
+    if contract_value is None:
+        if cycle.value == 1:
+            contract_value = price.value
+            flags.append("R_CONTRACT_INFERRED")
+        else:
+            reject(row.row_no, "R_CONTRACT_MISSING", field="合同金额", raw=amount_raw)
+            return None
+    # 一致性检查：月价 × 周期月数 应等于合同金额（合同允许谈折扣，只留标记不阻断）
+    if price.value is not None and contract_value is not None:
+        expected = Decimal(price.value) * Decimal(cycle.value)
+        if abs(expected - Decimal(contract_value)) > config.CONTRACT_TOLERANCE:
+            flags.append("R_CONTRACT_MISMATCH")
+    start, end = calendar_service.cycle_bounds(period_start.isoformat(), cycle.value)
+    length = calendar_service.cycle_days(period_start.isoformat(), cycle.value)
+    if length > period_days:
+        flags.append("R_CONTRACT_PRORATED")
+    return {
+        "monthly": price.value,
+        "contract_amount": contract_value,
+        "pricing_model": config.PRICING_CONTRACT,
+        "cycle_months": cycle.value,
+        "cycle_start": start,
+        "cycle_end": end,
+        "cycle_days": length,
+        "rate_days": length,
+        "contract_id": pricing_mod.contract_id_for(
+            mapping.value(row.fields, "sub_id").strip(), start),
+        "flags": flags,
+    }
 
 
 def _normalize_subscriptions(table, settings) -> tuple[list[dict], list[dict], dict]:
@@ -132,6 +210,12 @@ def _normalize_subscriptions(table, settings) -> tuple[list[dict], list[dict], d
             reject(row.row_no, state.code, field="状态",
                    raw=mapping.value(row.fields, "state"))
             continue
+        pricing = _resolve_pricing(mapping, row, price, start.value,
+                                   calendar_service.period_days(
+                                       start.value.isoformat(), end.value.isoformat()),
+                                   reject)
+        if pricing is None:
+            continue
         record = {
             "sub_id": sub_id,
             "account": mapping.value(row.fields, "account").strip(),
@@ -146,9 +230,19 @@ def _normalize_subscriptions(table, settings) -> tuple[list[dict], list[dict], d
                                                         end.value.isoformat()),
             "leap": int(calendar_service.leap_of(start.value.isoformat(),
                                                  end.value.isoformat())),
+            "pricing_model": pricing["pricing_model"],
+            "cycle_months": pricing["cycle_months"],
+            "cycle_start": pricing["cycle_start"].isoformat()
+            if hasattr(pricing["cycle_start"], "isoformat") else pricing["cycle_start"],
+            "cycle_end": pricing["cycle_end"].isoformat()
+            if hasattr(pricing["cycle_end"], "isoformat") else pricing["cycle_end"],
+            "cycle_days": pricing["cycle_days"],
+            "contract_amount": str(pricing["contract_amount"]),
+            "contract_id": pricing["contract_id"],
+            "rate_days": pricing["rate_days"],
             "source_file": table.name,
             "row_no": row.row_no,
-            "flags": list(price.flags),
+            "flags": pricing["flags"],
         }
         if sub_id in seen:
             kept = seen[sub_id]
@@ -355,6 +449,15 @@ def prepare(store, run_id: str, sub_table, change_table, settings) -> dict:
         for level in ("error", "warn", "info")
     }
     counters["quarantine_by_code"] = quarantine.count_by_code(entries)
+    by_model: dict[str, int] = {}
+    for sub in subs:
+        model = sub.get("pricing_model", config.PRICING_LEGACY)
+        by_model[model] = by_model.get(model, 0) + 1
+    counters["pricing_models"] = dict(sorted(by_model.items()))
+    counters["legacy_subs"] = by_model.get(config.PRICING_LEGACY, 0)
+    counters["contract_subs"] = by_model.get(config.PRICING_CONTRACT, 0)
+    counters["annual_subs"] = sum(
+        1 for sub in subs if int(sub.get("cycle_months") or 0) == 12)
     return {
         "subscriptions": subs,
         "changes": changes,
